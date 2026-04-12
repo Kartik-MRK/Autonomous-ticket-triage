@@ -27,13 +27,12 @@ class Settings:
     """
 
     # ---- API Keys ----
-    GITHUB_TOKEN: str = os.getenv("GITHUB_TOKEN", "")
     GOOGLE_API_KEY: str = os.getenv("GOOGLE_API_KEY", "")
 
     # ---- Model Configuration ----
     EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "BAAI/bge-large-en")
     RERANKER_MODEL: str = os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-12-v2")
-    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
     # ---- Retrieval Configuration ----
     RETRIEVAL_TOP_K: int = int(os.getenv("RETRIEVAL_TOP_K", "20"))
@@ -41,11 +40,8 @@ class Settings:
     BM25_TOP_K: int = int(os.getenv("BM25_TOP_K", "20"))
     RRF_K: int = 60  # Reciprocal Rank Fusion constant
 
-    # ---- GitHub Data Configuration ----
-    GITHUB_REPO_OWNER: str = os.getenv("GITHUB_REPO_OWNER", "microsoft")
-    GITHUB_REPO_NAME: str = os.getenv("GITHUB_REPO_NAME", "vscode")
-    MAX_ISSUES: int = int(os.getenv("MAX_ISSUES", "500"))
-    GITHUB_GRAPHQL_URL: str = "https://api.github.com/graphql"
+    # ---- Bugzilla Data Configuration ----
+    MAX_ISSUES: int = int(os.getenv("MAX_ISSUES", "800"))
 
     # ---- Data Paths ----
     DATA_DIR: Path = PROJECT_ROOT / "data"
@@ -53,8 +49,8 @@ class Settings:
     PROCESSED_DATA_DIR: Path = DATA_DIR / "processed"
     CHROMA_DB_DIR: Path = DATA_DIR / "chroma_db"
 
-    RAW_ISSUES_FILE: Path = RAW_DATA_DIR / "issues.json"
-    PROCESSED_ISSUES_FILE: Path = PROCESSED_DATA_DIR / "issues_processed.json"
+    RAW_ISSUES_FILE: Path = RAW_DATA_DIR / "bugzilla_core_raw_issues.json"
+    PROCESSED_ISSUES_FILE: Path = PROCESSED_DATA_DIR / "bugzilla_core_spacy_processed.json"
 
     # ---- ChromaDB Configuration ----
     CHROMA_COLLECTION_NAME: str = "ticket_embeddings"
@@ -81,8 +77,6 @@ class Settings:
     def validate(cls):
         """Validate that critical configuration is present."""
         warnings = []
-        if not cls.GITHUB_TOKEN:
-            warnings.append("GITHUB_TOKEN is not set - data ingestion will fail")
         if not cls.GOOGLE_API_KEY:
             warnings.append("GOOGLE_API_KEY is not set - classification/generation will fail")
         return warnings

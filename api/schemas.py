@@ -84,7 +84,7 @@ class RetrievedReference(BaseModel):
 
     issue_number: str = Field(
         ...,
-        description="GitHub issue number",
+        description="Bugzilla issue number",
         json_schema_extra={"example": "12345"},
     )
 

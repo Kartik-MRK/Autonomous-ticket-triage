@@ -25,18 +25,16 @@ def main():
 
     args = parser.parse_args()
 
-    # Sample ticket for testing
+    # Sample Mozilla Core style ticket for testing
     sample_ticket = {
-        "title": "VSCode crashes when opening large file",
+        "title": "Firefox crashes during WebRTC media negotiation",
         "description": (
-            "The editor freezes and becomes completely unresponsive when trying to "
-            "open files larger than 200MB. This happens consistently on Windows 11 "
-            "with VSCode version 1.85. The application needs to be force-closed via "
-            "Task Manager. Memory usage spikes to over 4GB before the freeze. "
-            "This regression started after the latest update."
+            "Firefox becomes unresponsive during WebRTC call setup on Linux after "
+            "the media pipeline negotiates codecs. The browser UI freezes for 20-30 "
+            "seconds and then crashes. This started in a recent nightly build."
         ),
-        "labels": ["bug", "editor", "performance"],
-        "comments": "Multiple users have reported this issue after the 1.85 update.",
+        "labels": ["mozilla-core", "bug", "webrtc"],
+        "comments": "Crash signatures appear around RTP transport negotiation.",
     }
 
     print("=" * 60)

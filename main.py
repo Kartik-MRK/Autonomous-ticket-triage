@@ -1,29 +1,32 @@
 """
-Autonomous Ticket Triage and Routing
-========================================
-Main entry point for the application.
+Mozilla Core Autonomous Ticket Triage
+====================================
+Main CLI entry point focused on Bugzilla Core data.
 
-Commands:
-    python main.py serve          - Start the FastAPI server
-    python main.py ingest         - Fetch issues from GitHub
-    python main.py preprocess     - Preprocess raw issues
-    python main.py build-index    - Build the vector store index
-    python main.py evaluate       - Run evaluation metrics
-    python main.py pipeline       - Run pipeline on a sample ticket
+Core workflow:
+1) python main.py ingest-bugzilla
+2) python main.py build-bugzilla-index --rebuild-clean --reset
+3) python main.py run-cli
+
+Optional frontend:
+- python main.py ui
 """
 
-import sys
+from __future__ import annotations
+
 import argparse
+import json
+import subprocess
+import sys
 
 
-def cmd_serve(args):
+def cmd_serve(args) -> None:
     """Start the FastAPI server."""
     import uvicorn
     from utils.config import settings
 
-    print("Starting Autonomous Ticket Triage API Server...")
+    print("Starting Mozilla Core Triage API...")
     print(f"Swagger UI: http://localhost:{settings.API_PORT}/docs")
-    print(f"ReDoc: http://localhost:{settings.API_PORT}/redoc")
 
     uvicorn.run(
         "api.server:app",
@@ -34,123 +37,66 @@ def cmd_serve(args):
     )
 
 
-def cmd_ingest(args):
-    """Run data ingestion from GitHub."""
-    from modules.ingestion import fetch_issues, save_issues
-    from utils.config import settings
-    from utils.logger import get_logger
+def cmd_ingest_bugzilla(args) -> None:
+    """Fetch raw Mozilla Bugzilla Core bugs and save under data/raw."""
+    from modules.bugzilla_ingestion import (
+        build_bugzilla_core_raw_data,
+        save_bugzilla_raw_data,
+    )
 
-    logger = get_logger("main.ingest")
+    raw_data = build_bugzilla_core_raw_data(
+        target_count=args.target_bugs,
+        page_size=args.page_size,
+        bug_list_delay=args.list_delay,
+        comment_delay=args.comment_delay,
+    )
 
-    if not settings.GITHUB_TOKEN:
-        print("ERROR: GITHUB_TOKEN is not set in .env file!")
+    if not raw_data:
+        print("No Bugzilla records were produced. Check logs and try again.")
         sys.exit(1)
 
-    logger.info(f"Fetching up to {args.max_issues} issues from GitHub...")
-    issues = fetch_issues(max_issues=args.max_issues)
-    save_issues(issues)
-    print(f"Done! {len(issues)} issues saved to {settings.RAW_ISSUES_FILE}")
+    output_path = save_bugzilla_raw_data(raw_data, output_path=args.output)
+    print(f"Done! {len(raw_data)} raw Bugzilla records saved to {output_path}")
 
 
-def cmd_preprocess(args):
-    """Preprocess raw issues."""
-    from modules.ingestion import load_raw_issues
-    from modules.preprocessing import preprocess_batch
-    from utils.logger import get_logger
+def cmd_build_bugzilla_index(args) -> None:
+    """Build clean Bugzilla data, run regex+spaCy, and index in ChromaDB."""
+    from modules.bugzilla_index_builder import build_bugzilla_index
 
-    logger = get_logger("main.preprocess")
-
-    logger.info("Loading raw issues...")
-    raw_issues = load_raw_issues()
-
-    logger.info(f"Preprocessing {len(raw_issues)} issues...")
-    processed = preprocess_batch(raw_issues)
-    print(f"Done! {len(processed)} issues preprocessed and saved.")
-
-
-def cmd_build_index(args):
-    """Build the vector store index."""
-    from modules.ingestion import load_raw_issues
-    from modules.preprocessing import preprocess_batch, load_processed_issues
-    from modules.embedding import generate_embeddings_batch
-    from modules.vector_store import add_documents, get_collection, get_collection_stats
-    from utils.config import settings
-    from utils.logger import get_logger
-
-    logger = get_logger("main.build_index")
-
-    # Check if processed data exists
-    if settings.PROCESSED_ISSUES_FILE.exists() and not args.reprocess:
-        logger.info("Loading existing processed data...")
-        processed_issues = load_processed_issues()
-    else:
-        logger.info("Loading and preprocessing raw issues...")
-        raw_issues = load_raw_issues()
-        processed_issues = preprocess_batch(raw_issues)
-
-    if args.reset:
-        logger.info("Resetting vector store...")
-        get_collection(reset=True)
-
-    # Generate embeddings
-    logger.info("Generating embeddings (this may take a while)...")
-    texts = [issue["unified_text"] for issue in processed_issues]
-    embeddings = generate_embeddings_batch(texts, is_query=False, batch_size=32)
-
-    # Store in ChromaDB
-    ids = [str(issue["number"]) for issue in processed_issues]
-    metadatas = [
-        {
-            "issue_number": str(issue["number"]),
-            "title": issue.get("original_title", ""),
-            "labels": ", ".join(issue.get("labels", [])),
-            "state": issue.get("state", ""),
-            "assignees": ", ".join(issue.get("assignees", [])),
-        }
-        for issue in processed_issues
-    ]
-
-    add_documents(
-        ids=ids,
-        embeddings=embeddings.tolist(),
-        documents=texts,
-        metadatas=metadatas,
+    summary = build_bugzilla_index(
+        raw_input=args.raw_input,
+        clean_input=args.clean_input,
+        processed_output=args.processed_output,
+        max_records=args.max_records,
+        rebuild_clean=args.rebuild_clean,
+        reset=args.reset,
     )
 
-    stats = get_collection_stats()
-    print(f"Done! Vector store contains {stats['count']} documents.")
-
-
-def cmd_evaluate(args):
-    """Run evaluation."""
-    from evaluation.evaluate import run_evaluation
-
-    results = run_evaluation(
-        max_test_samples=args.max_samples,
+    stats = summary.get("collection_stats", {})
+    print(
+        "Done! "
+        f"clean={summary.get('clean_count', 0)}, "
+        f"spacy_processed={summary.get('spacy_processed_count', 0)}, "
+        f"chroma_count={stats.get('count', 0)}"
     )
 
-    print("\n=== Evaluation Summary ===")
-    for key, value in results.items():
-        if isinstance(value, float):
-            print(f"  {key}: {value:.4f}")
-        elif isinstance(value, (int, str)):
-            print(f"  {key}: {value}")
 
-
-def cmd_pipeline(args):
-    """Run the pipeline on a sample ticket."""
-    import json
+def cmd_pipeline(args) -> None:
+    """Run one query through the full triage pipeline."""
     from pipeline.triage_pipeline import run_triage_pipeline
 
-    # Sample ticket
+    title = args.title or "Firefox crashes while opening a large media stream"
+    description = args.description or (
+        "Firefox becomes unresponsive and eventually crashes when a large media "
+        "stream starts in a WebRTC session on Linux."
+    )
+    labels = args.labels.split(",") if args.labels else ["mozilla-core", "bug"]
+
     result = run_triage_pipeline(
-        title=args.title or "VSCode crashes when opening large file",
-        description=args.description or (
-            "The editor freezes and becomes completely unresponsive when trying to "
-            "open files larger than 200MB. This happens consistently on Windows 11. "
-            "Memory usage spikes to over 4GB before the freeze."
-        ),
-        labels=args.labels.split(",") if args.labels else ["bug", "editor"],
+        title=title,
+        description=description,
+        labels=[label.strip() for label in labels if label.strip()],
+        comments=args.comments or "",
     )
 
     print("\n" + "=" * 60)
@@ -159,48 +105,147 @@ def cmd_pipeline(args):
     print(json.dumps(result, indent=2))
 
 
-def main():
+def cmd_run_cli(_args) -> None:
+    """Start interactive CLI query loop."""
+    subprocess.run([sys.executable, "scripts/run_bugzilla_pipeline.py"], check=False)
+
+
+def cmd_ui(args) -> None:
+    """Launch the Streamlit frontend."""
+    cmd = [
+        sys.executable,
+        "-m",
+        "streamlit",
+        "run",
+        "streamlit_app.py",
+        "--server.port",
+        str(args.port),
+    ]
+    subprocess.run(cmd, check=False)
+
+
+def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Autonomous Ticket Triage and Routing System",
+        description="Mozilla Core Autonomous Ticket Triage",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python main.py serve                    # Start API server
-  python main.py ingest --max-issues 500  # Fetch 500 GitHub issues
-  python main.py preprocess               # Clean and tokenize issues
-  python main.py build-index --reset      # Build vector store
-  python main.py evaluate                 # Run evaluation metrics
-  python main.py pipeline                 # Test with sample ticket
-        """,
+        epilog=(
+            "Quick start:\n"
+            "  python main.py ingest-bugzilla --target-bugs 800\n"
+            "  python main.py build-bugzilla-index --rebuild-clean --reset\n"
+            "  python main.py run-cli\n"
+            "  python main.py ui"
+        ),
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
-    # ---- Serve ----
-    serve_parser = subparsers.add_parser("serve", help="Start the FastAPI server")
+    # ---- Serve API ----
+    serve_parser = subparsers.add_parser("serve", help="Start FastAPI server")
     serve_parser.add_argument("--reload", action="store_true", help="Enable auto-reload")
 
-    # ---- Ingest ----
-    ingest_parser = subparsers.add_parser("ingest", help="Fetch issues from GitHub")
-    ingest_parser.add_argument("--max-issues", type=int, default=500, help="Max issues to fetch")
+    # ---- Ingest Bugzilla ----
+    ingest_bugzilla_parser = subparsers.add_parser(
+        "ingest-bugzilla",
+        help="Fetch raw Mozilla Bugzilla Core bugs",
+    )
+    ingest_bugzilla_parser.add_argument(
+        "--target-bugs",
+        type=int,
+        default=800,
+        help="Target number of Bugzilla bugs to fetch",
+    )
+    ingest_bugzilla_parser.add_argument(
+        "--page-size",
+        type=int,
+        default=100,
+        help="Page size for Bugzilla pagination",
+    )
+    ingest_bugzilla_parser.add_argument(
+        "--list-delay",
+        type=float,
+        default=0.25,
+        help="Delay in seconds between bug list API calls",
+    )
+    ingest_bugzilla_parser.add_argument(
+        "--comment-delay",
+        type=float,
+        default=0.1,
+        help="Delay in seconds between comment API calls",
+    )
+    ingest_bugzilla_parser.add_argument(
+        "--output",
+        type=str,
+        default="data/raw/bugzilla_core_raw_issues.json",
+        help="Raw output JSON path",
+    )
 
-    # ---- Preprocess ----
-    subparsers.add_parser("preprocess", help="Preprocess raw issues")
+    # ---- Build Bugzilla Index ----
+    build_bugzilla_parser = subparsers.add_parser(
+        "build-bugzilla-index",
+        help="Build clean dataset, regex+spaCy data, and Chroma index",
+    )
+    build_bugzilla_parser.add_argument(
+        "--raw-input",
+        type=str,
+        default="data/raw/bugzilla_core_raw_issues.json",
+        help="Path to raw Bugzilla dataset JSON",
+    )
+    build_bugzilla_parser.add_argument(
+        "--clean-input",
+        type=str,
+        default="data/processed/bugzilla_core_clean_dataset.json",
+        help="Path to clean Bugzilla dataset JSON",
+    )
+    build_bugzilla_parser.add_argument(
+        "--processed-output",
+        type=str,
+        default="data/processed/bugzilla_core_spacy_processed.json",
+        help="Output for regex+spaCy processed records",
+    )
+    build_bugzilla_parser.add_argument(
+        "--max-records",
+        type=int,
+        default=None,
+        help="Optional cap for clean dataset build",
+    )
+    build_bugzilla_parser.add_argument(
+        "--rebuild-clean",
+        action="store_true",
+        help="Force rebuilding clean dataset from raw",
+    )
+    build_bugzilla_parser.add_argument(
+        "--reset",
+        action="store_true",
+        help="Reset Chroma collection before indexing",
+    )
 
-    # ---- Build Index ----
-    index_parser = subparsers.add_parser("build-index", help="Build the vector store index")
-    index_parser.add_argument("--reset", action="store_true", help="Reset vector store first")
-    index_parser.add_argument("--reprocess", action="store_true", help="Force reprocessing")
-
-    # ---- Evaluate ----
-    eval_parser = subparsers.add_parser("evaluate", help="Run evaluation metrics")
-    eval_parser.add_argument("--max-samples", type=int, default=50, help="Max test samples")
-
-    # ---- Pipeline ----
-    pipeline_parser = subparsers.add_parser("pipeline", help="Run pipeline on a ticket")
+    # ---- One-off pipeline ----
+    pipeline_parser = subparsers.add_parser(
+        "pipeline",
+        help="Run a single query through the triage pipeline",
+    )
     pipeline_parser.add_argument("--title", type=str, help="Ticket title")
     pipeline_parser.add_argument("--description", type=str, help="Ticket description")
     pipeline_parser.add_argument("--labels", type=str, help="Comma-separated labels")
+    pipeline_parser.add_argument("--comments", type=str, help="Additional comments")
+
+    # ---- Interactive CLI ----
+    subparsers.add_parser(
+        "run-cli",
+        help="Open interactive terminal query loop",
+    )
+
+    # ---- Streamlit UI ----
+    ui_parser = subparsers.add_parser(
+        "ui",
+        help="Launch Streamlit frontend",
+    )
+    ui_parser.add_argument(
+        "--port",
+        type=int,
+        default=8501,
+        help="Streamlit port",
+    )
 
     args = parser.parse_args()
 
@@ -208,14 +253,13 @@ Examples:
         parser.print_help()
         sys.exit(1)
 
-    # Route to the appropriate command
     commands = {
         "serve": cmd_serve,
-        "ingest": cmd_ingest,
-        "preprocess": cmd_preprocess,
-        "build-index": cmd_build_index,
-        "evaluate": cmd_evaluate,
+        "ingest-bugzilla": cmd_ingest_bugzilla,
+        "build-bugzilla-index": cmd_build_bugzilla_index,
         "pipeline": cmd_pipeline,
+        "run-cli": cmd_run_cli,
+        "ui": cmd_ui,
     }
 
     commands[args.command](args)
