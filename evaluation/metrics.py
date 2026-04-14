@@ -28,7 +28,7 @@ from sklearn.metrics import (
     classification_report,
 )
 
-from utils.logger import get_logger
+from utils.logger import get_logger  # noqa: uses config.settings via logger
 
 logger = get_logger(__name__)
 

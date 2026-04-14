@@ -1,1 +1,1 @@
-# Modules package
+"""Core modules package."""

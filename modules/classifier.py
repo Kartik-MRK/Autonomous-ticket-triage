@@ -1,58 +1,92 @@
 """
-Ticket Classification Module (Gemini)
-========================================
-Uses Google AI Studio (Gemini) to classify tickets into structured categories.
+Ticket Classification Module (Ollama / llama3.1:8b)
+=====================================================
+Uses local Ollama LLM to classify tickets into structured categories.
+
+Supports two modes:
+  1. **Generic mode** (backward-compatible): classifies into
+     [frontend | backend | infrastructure] when no known_teams provided.
+  2. **Fine-grained mode**: classifies into a specific team from
+     a known_teams list, optionally using retrieved documents as
+     context (Retrieval-Augmented Classification).
 
 Classification output:
 - type: bug | feature | improvement
 - severity: low | medium | high
-- team: frontend | backend | infrastructure
-
-Key Design Decisions:
-- Strict prompt engineering forces JSON-only output
-- Temperature=0 for deterministic, constrained responses
-- Retry logic for malformed JSON responses
-- Fallback defaults for robustness
-- Model name configurable via settings for easy switching
-
-References:
-- https://ai.google.dev/api
+- team: one of the known teams (or generic bucket)
 """
 
 import json
+import re
 import time
 from typing import Optional
 
-from google import genai
-from google.genai import types
+import requests
 
-from utils.config import settings
+from config.settings import settings
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 # ============================================
-# Gemini Client (singleton)
+# Generic fallback teams (backward compat)
 # ============================================
-_client = None
+GENERIC_TEAMS = ["frontend", "backend", "infrastructure"]
 
 
-def _get_client():
-    """Get or create the Gemini API client."""
-    global _client
-    if _client is None:
-        _client = genai.Client(api_key=settings.GOOGLE_API_KEY)
-        logger.info(f"Gemini client initialized (model: {settings.GEMINI_MODEL})")
-    return _client
+def _extract_json_block(text: str) -> str:
+    """Extract a JSON object from mixed LLM output."""
+    cleaned = text.strip()
+    if cleaned.startswith("```json"):
+        cleaned = cleaned[7:]
+    if cleaned.startswith("```"):
+        cleaned = cleaned[3:]
+    if cleaned.endswith("```"):
+        cleaned = cleaned[:-3]
+    cleaned = cleaned.strip()
+    if cleaned.startswith("{") and cleaned.endswith("}"):
+        return cleaned
+    match = re.search(r"\{[\s\S]*\}", cleaned)
+    if match:
+        return match.group(0)
+    return "{}"
+
+
+def _request_ollama(prompt: str, temperature: float = 0.1, max_tokens: int = 300) -> str:
+    """Call Ollama /api/generate with retry logic."""
+    url = f"{settings.OLLAMA_BASE_URL}/api/generate"
+    payload = {
+        "model": settings.OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": False,
+        "options": {
+            "temperature": temperature,
+            "num_predict": max_tokens,
+        },
+    }
+    for attempt in range(3):
+        try:
+            response = requests.post(url, json=payload, timeout=settings.OLLAMA_TIMEOUT)
+            if response.status_code == 200:
+                body = response.json()
+                return str(body.get("response", "")).strip()
+            logger.warning(f"Ollama request failed ({response.status_code}) attempt {attempt + 1}/3")
+        except requests.RequestException as exc:
+            logger.warning(f"Ollama request error attempt {attempt + 1}/3: {exc}")
+        if attempt < 2:
+            time.sleep(2 ** attempt)
+    raise RuntimeError("Failed to get response from Ollama. Check service availability.")
 
 
 # ============================================
-# Classification Prompt Template
+# Prompt Templates
 # ============================================
-CLASSIFICATION_PROMPT = """You are an expert software issue ticket classification system. Your task is to analyze the given ticket and classify it precisely.
+
+# --- Generic prompt (no known_teams) — backward compatible ---
+GENERIC_CLASSIFICATION_PROMPT = """You are an expert software issue ticket classification system.
 
 STRICT RULES:
-1. You MUST respond with ONLY valid JSON - no markdown, no explanation, no extra text.
+1. Respond with ONLY valid JSON - no markdown, no explanation, no extra text.
 2. The JSON must have exactly these three fields:
    - "type": exactly one of ["bug", "feature", "improvement"]
    - "severity": exactly one of ["low", "medium", "high"]
@@ -68,7 +102,7 @@ CLASSIFICATION GUIDELINES:
 - "high": Critical bug, data loss, crash, security issue, affects many users
 
 - "frontend": UI, editor, themes, keybindings, extensions UI, rendering
-- "backend": Core engine, file system, language services, debugging, Git integration
+- "backend": Core engine, file system, language services, debugging, networking
 - "infrastructure": Build system, CI/CD, installation, updates, performance, memory
 
 TICKET TO CLASSIFY:
@@ -78,114 +112,235 @@ Labels: {labels}
 
 Respond with ONLY the JSON object:"""
 
+# --- Fine-grained prompt (with known_teams + retrieved context) ---
+FINEGRAINED_CLASSIFICATION_PROMPT = """You are an expert software issue ticket triage system. Your job is to classify a ticket and route it to the correct team.
 
-def _parse_classification_response(response_text: str) -> Optional[dict]:
+STRICT RULES:
+1. Respond with ONLY valid JSON — no markdown, no explanation, no extra text.
+2. The JSON must have exactly these three fields:
+   - "type": exactly one of ["bug", "feature", "improvement"]
+   - "severity": exactly one of ["low", "medium", "high"]
+   - "team": exactly one team name from the VALID TEAMS list below
+
+VALID TEAMS (you MUST pick exactly one):
+{valid_teams}
+
+{retrieved_context}
+
+CLASSIFICATION GUIDELINES:
+Type:
+- "bug": Something is broken, crashing, producing errors, or not working as expected
+- "feature": A new capability or functionality that does not exist yet
+- "improvement": Enhancement, optimization, or polish to existing functionality
+
+Severity:
+- "low": Minor cosmetic issue, nice-to-have, affects few users
+- "medium": Functional issue with moderate impact, workaround exists
+- "high": Critical bug, crash, data loss, security issue, blocks many users
+
+Team Selection:
+- Read the ticket title and description carefully.
+- Look at the similar resolved tickets above — they show which teams handled similar issues.
+- Pick the team whose past tickets are most semantically similar to this new ticket.
+- If multiple teams seem plausible, prefer the team that appears most frequently in the similar tickets.
+
+TICKET TO CLASSIFY:
+Title: {title}
+Description: {description}
+Labels: {labels}
+
+Think step-by-step:
+1. What is this ticket about? (core topic / component)
+2. Which similar past tickets match most closely?
+3. Which team handled those similar tickets?
+4. Therefore, the correct team is...
+
+Now respond with ONLY the JSON object:"""
+
+
+def _format_retrieved_teams_context(retrieved_docs: list[dict]) -> str:
+    """Format retrieved docs into a concise context block for the classifier."""
+    if not retrieved_docs:
+        return ""
+
+    lines = ["SIMILAR RESOLVED TICKETS (use these to determine the correct team):"]
+    for i, doc in enumerate(retrieved_docs[:7], 1):
+        metadata = doc.get("metadata", {}) if isinstance(doc, dict) else {}
+        title = metadata.get("title", "Unknown")
+        team = metadata.get("team", "unknown")
+        component = metadata.get("component", "unknown")
+        score = doc.get("rerank_score", doc.get("rrf_score", doc.get("score", 0)))
+        lines.append(
+            f"  #{i}: \"{title}\" → Team: {team} | Component: {component} (relevance: {score:.3f})"
+        )
+    return "\n".join(lines)
+
+
+def _extract_retrieved_teams(retrieved_docs: list[dict]) -> list[str]:
+    """Extract unique team names from retrieved documents, preserving order."""
+    seen = set()
+    teams = []
+    for doc in retrieved_docs:
+        metadata = doc.get("metadata", {}) if isinstance(doc, dict) else {}
+        team = str(metadata.get("team", "")).strip().lower()
+        if team and team != "unknown" and team not in seen:
+            seen.add(team)
+            teams.append(team)
+    return teams
+
+
+def _find_closest_team(predicted: str, known_teams: list[str], retrieved_docs: list[dict] = None) -> str:
     """
-    Parse the Gemini response into a classification dictionary.
-    Handles common response formatting issues.
+    When the LLM outputs a team not in known_teams, find the best fallback.
 
-    Args:
-        response_text: Raw response from Gemini.
-
-    Returns:
-        Parsed classification dict or None if parsing fails.
+    Strategy:
+    1. Exact match (case-insensitive) → return it
+    2. Substring match (e.g., "html parser" in "dom: html parser") → return it
+    3. Fall back to the most frequent team in retrieved docs
+    4. Last resort → first known_team
     """
-    text = response_text.strip()
+    predicted_lower = predicted.strip().lower()
 
-    # Remove markdown code block markers if present
-    if text.startswith("```json"):
-        text = text[7:]
-    if text.startswith("```"):
-        text = text[3:]
-    if text.endswith("```"):
-        text = text[:-3]
-    text = text.strip()
+    # 1. Exact match
+    for team in known_teams:
+        if team.lower() == predicted_lower:
+            return team
 
-    try:
-        result = json.loads(text)
+    # 2. Substring / partial match
+    for team in known_teams:
+        team_lower = team.lower()
+        if predicted_lower in team_lower or team_lower in predicted_lower:
+            return team
 
-        # Validate required fields
-        valid_types = {"bug", "feature", "improvement"}
-        valid_severities = {"low", "medium", "high"}
-        valid_teams = {"frontend", "backend", "infrastructure"}
+    # 3. Most frequent retrieved team that IS in known_teams
+    if retrieved_docs:
+        retrieved_teams = _extract_retrieved_teams(retrieved_docs)
+        for rt in retrieved_teams:
+            for team in known_teams:
+                if team.lower() == rt.lower():
+                    return team
 
-        if result.get("type") not in valid_types:
-            result["type"] = "bug"  # Safe default
-        if result.get("severity") not in valid_severities:
-            result["severity"] = "medium"
-        if result.get("team") not in valid_teams:
-            result["team"] = "backend"
-
-        return result
-
-    except json.JSONDecodeError as e:
-        logger.warning(f"Failed to parse classification JSON: {e}")
-        logger.warning(f"Raw response: {text[:200]}")
-        return None
+    # 4. Last resort
+    return known_teams[0] if known_teams else predicted
 
 
 def classify_ticket(
     title: str,
     description: str,
     labels: list[str] = None,
+    known_teams: list[str] = None,
+    retrieved_docs: list[dict] = None,
     max_retries: int = 3,
 ) -> dict:
     """
-    Classify a ticket using Google Gemini.
+    Classify a ticket using local Ollama llama3.1:8b.
 
-    Args:
-        title: Ticket title.
-        description: Ticket description (cleaned).
-        labels: Optional list of existing labels.
-        max_retries: Number of retry attempts for malformed responses.
+    Parameters
+    ----------
+    title : str
+        Ticket title.
+    description : str
+        Ticket description / body.
+    labels : list[str], optional
+        Label strings (e.g., ["component:Layout", "team:Tables"]).
+    known_teams : list[str], optional
+        Valid team names. If provided, the classifier is constrained
+        to output one of these teams (Fine-grained mode).
+        If None, falls back to generic 3-team classification.
+    retrieved_docs : list[dict], optional
+        Top reranked documents from retrieval. Used to provide
+        context about which teams handled similar tickets
+        (Retrieval-Augmented Classification).
+    max_retries : int
+        Number of LLM call retries on failure.
 
-    Returns:
-        Classification dictionary with type, severity, and team.
+    Returns
+    -------
+    dict with keys: type, severity, team
     """
-    client = _get_client()
-
     labels_str = ", ".join(labels) if labels else "none"
+    use_finegrained = known_teams is not None and len(known_teams) > 0
 
-    prompt = CLASSIFICATION_PROMPT.format(
-        title=title,
-        description=description[:2000],  # Limit description length
-        labels=labels_str,
-    )
+    if use_finegrained:
+        # --- Fine-grained mode ---
+        valid_teams_str = "\n".join(f"  - {team}" for team in known_teams)
+        retrieved_context = _format_retrieved_teams_context(retrieved_docs or [])
+
+        prompt = FINEGRAINED_CLASSIFICATION_PROMPT.format(
+            title=title,
+            description=description[:2000],
+            labels=labels_str,
+            valid_teams=valid_teams_str,
+            retrieved_context=retrieved_context,
+        )
+    else:
+        # --- Generic mode (backward compatible) ---
+        prompt = GENERIC_CLASSIFICATION_PROMPT.format(
+            title=title,
+            description=description[:2000],
+            labels=labels_str,
+        )
+
+    valid_types = {"bug", "feature", "improvement"}
+    valid_severities = {"low", "medium", "high"}
+    valid_team_set = {t.lower() for t in known_teams} if use_finegrained else {"frontend", "backend", "infrastructure"}
 
     for attempt in range(max_retries):
         try:
-            response = client.models.generate_content(
-                model=settings.GEMINI_MODEL,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0,
-                    max_output_tokens=200,
-                ),
+            response_text = _request_ollama(prompt, temperature=0.1, max_tokens=300)
+            json_block = _extract_json_block(response_text)
+            result = json.loads(json_block)
+
+            # --- Validate type ---
+            if result.get("type") not in valid_types:
+                result["type"] = "bug"
+
+            # --- Validate severity ---
+            if result.get("severity") not in valid_severities:
+                result["severity"] = "medium"
+
+            # --- Validate team ---
+            predicted_team = str(result.get("team", "")).strip().lower()
+            if use_finegrained:
+                if predicted_team not in valid_team_set:
+                    # LLM picked a team not in the list — find closest match
+                    resolved_team = _find_closest_team(predicted_team, known_teams, retrieved_docs)
+                    logger.info(
+                        f"Classifier output '{predicted_team}' not in known_teams, "
+                        f"resolved to '{resolved_team}'"
+                    )
+                    result["team"] = resolved_team
+                else:
+                    # Normalize to the canonical casing from known_teams
+                    for kt in known_teams:
+                        if kt.lower() == predicted_team:
+                            result["team"] = kt
+                            break
+            else:
+                if predicted_team not in valid_team_set:
+                    result["team"] = "backend"
+
+            logger.info(
+                f"Classification: type={result['type']}, "
+                f"severity={result['severity']}, team={result['team']}"
             )
+            return result
 
-            response_text = response.text
-            result = _parse_classification_response(response_text)
-
-            if result is not None:
-                logger.info(
-                    f"Classification: type={result['type']}, "
-                    f"severity={result['severity']}, team={result['team']}"
-                )
-                return result
-
-            logger.warning(
-                f"Classification attempt {attempt + 1} produced invalid JSON. Retrying..."
-            )
-
-        except Exception as e:
-            logger.error(f"Classification error (attempt {attempt + 1}): {e}")
+        except (json.JSONDecodeError, RuntimeError) as e:
+            logger.warning(f"Classification attempt {attempt + 1} failed: {e}")
             if attempt < max_retries - 1:
                 time.sleep(1)
 
-    # Fallback if all retries fail
-    logger.warning("All classification attempts failed. Using defaults.")
-    return {
-        "type": "bug",
-        "severity": "medium",
-        "team": "backend",
-    }
+    # --- All retries failed: smart fallback ---
+    logger.warning("All classification attempts failed. Using fallback.")
+    fallback_team = "backend"
+    if use_finegrained and retrieved_docs:
+        retrieved_teams = _extract_retrieved_teams(retrieved_docs)
+        if retrieved_teams:
+            fallback_team = retrieved_teams[0]
+            # Ensure it's in known_teams
+            fallback_team = _find_closest_team(fallback_team, known_teams, retrieved_docs)
+    elif use_finegrained and known_teams:
+        fallback_team = known_teams[0]
+
+    return {"type": "bug", "severity": "medium", "team": fallback_team}

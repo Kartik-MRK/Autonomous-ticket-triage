@@ -1,1 +1,1 @@
-# Pipeline package
+"""Pipeline package."""

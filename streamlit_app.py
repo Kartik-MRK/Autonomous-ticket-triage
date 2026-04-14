@@ -1,19 +1,18 @@
 """
 Mozilla Core Ticket Triage UI (Streamlit)
 =========================================
-Custom Streamlit frontend for querying the Bugzilla-powered RAG pipeline.
+Streamlit frontend for querying the Bugzilla-powered RAG pipeline.
+Uses Ollama llama3.1:8b for LLM operations.
 
-Run:
-    streamlit run streamlit_app.py
+Run: streamlit run streamlit_app.py
 """
 
 from __future__ import annotations
-
 import streamlit as st
 
 from modules.vector_store import get_collection_stats
 from pipeline.triage_pipeline import run_triage_pipeline
-
+from config.settings import settings
 
 st.set_page_config(
     page_title="Mozilla Core Ticket Triage",
@@ -21,7 +20,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
-
 
 CUSTOM_CSS = """
 <style>
@@ -64,16 +62,8 @@ CUSTOM_CSS = """
     margin-bottom: 1rem;
 }
 
-.hero h1 {
-    font-size: 1.8rem;
-    margin: 0;
-    color: var(--text);
-}
-
-.hero p {
-    margin: 0.3rem 0 0 0;
-    color: var(--muted);
-}
+.hero h1 { font-size: 1.8rem; margin: 0; color: var(--text); }
+.hero p { margin: 0.3rem 0 0 0; color: var(--muted); }
 
 .small-chip {
     display: inline-block;
@@ -101,8 +91,7 @@ CUSTOM_CSS = """
     padding: 0.75rem;
 }
 
-.stTextArea textarea,
-.stTextInput input {
+.stTextArea textarea, .stTextInput input {
     background-color: #111923 !important;
     color: var(--text) !important;
     border: 1px solid var(--line) !important;
@@ -113,6 +102,16 @@ CUSTOM_CSS = """
     border: 1px solid #3a4f6b;
     background: linear-gradient(90deg, #2f4f74, #3b6a64);
     color: white;
+    font-weight: 600;
+}
+
+.hyde-badge {
+    display: inline-block;
+    background: linear-gradient(90deg, #c678dd, #61afef);
+    color: white;
+    border-radius: 8px;
+    padding: 0.2rem 0.6rem;
+    font-size: 0.75rem;
     font-weight: 600;
 }
 </style>
@@ -131,7 +130,6 @@ def _render_reference_cards(references: list[dict]) -> None:
     if not references:
         st.info("No related Bugzilla records were retrieved for this query.")
         return
-
     for ref in references[:8]:
         issue_number = ref.get("issue_number", "N/A")
         score = float(ref.get("similarity_score", 0.0))
@@ -147,17 +145,8 @@ def _render_reference_cards(references: list[dict]) -> None:
         )
 
 
-def _run_query(title: str, description: str, labels: list[str], comments: str) -> dict:
-    return run_triage_pipeline(
-        title=title,
-        description=description,
-        labels=labels,
-        comments=comments,
-    )
-
-
 st.markdown(
-    """
+    f"""
 <div class='hero'>
     <h1>Mozilla Core Autonomous Ticket Triage</h1>
     <p>
@@ -165,13 +154,14 @@ st.markdown(
         debugging steps, and likely root causes from the RAG pipeline.
     </p>
     <span class='small-chip'>Regex + spaCy preprocessing</span>
-    <span class='small-chip'>Hybrid retrieval + reranking</span>
-    <span class='small-chip'>ChromaDB persistent index</span>
+    <span class='small-chip'>Hybrid retrieval + RRF</span>
+    <span class='small-chip'>BAAI/bge-reranker-base</span>
+    <span class='small-chip'>HyDE fallback</span>
+    <span class='small-chip'>Ollama {settings.OLLAMA_MODEL}</span>
 </div>
 """,
     unsafe_allow_html=True,
 )
-
 
 try:
     indexed_count = _get_index_count()
@@ -179,25 +169,29 @@ except Exception as exc:
     indexed_count = 0
     st.error(f"Could not read vector store: {exc}")
 
-col_m1, col_m2, col_m3 = st.columns(3)
+col_m1, col_m2, col_m3, col_m4 = st.columns(4)
 with col_m1:
     st.markdown("<div class='metric-box'>", unsafe_allow_html=True)
-    st.metric("Indexed Mozilla records", f"{indexed_count}")
+    st.metric("Indexed Records", f"{indexed_count}")
     st.markdown("</div>", unsafe_allow_html=True)
 with col_m2:
     st.markdown("<div class='metric-box'>", unsafe_allow_html=True)
-    st.metric("Retrieval Strategy", "Dense + BM25 + RRF")
+    st.metric("Retrieval", "Dense + BM25 + RRF")
     st.markdown("</div>", unsafe_allow_html=True)
 with col_m3:
     st.markdown("<div class='metric-box'>", unsafe_allow_html=True)
-    st.metric("Reranker", "cross-encoder")
+    st.metric("Reranker", "bge-reranker-base")
+    st.markdown("</div>", unsafe_allow_html=True)
+with col_m4:
+    st.markdown("<div class='metric-box'>", unsafe_allow_html=True)
+    st.metric("LLM", settings.OLLAMA_MODEL)
     st.markdown("</div>", unsafe_allow_html=True)
 
 if indexed_count == 0:
     st.warning(
         "Index is empty. Run these commands first:\n"
-        "1) python scripts/ingest_bugzilla_core.py --target-bugs 800\n"
-        "2) python scripts/build_bugzilla_index.py --rebuild-clean --reset"
+        "1) python main.py ingest\n"
+        "2) python main.py build-index"
     )
 
 st.markdown("<div class='panel'>", unsafe_allow_html=True)
@@ -237,7 +231,12 @@ if submit:
     else:
         labels = [x.strip() for x in labels_raw.split(",") if x.strip()]
         with st.spinner("Running retrieval, reranking, classification, and generation..."):
-            result = _run_query(title.strip(), description.strip(), labels, comments.strip())
+            result = run_triage_pipeline(
+                title=title.strip(),
+                description=description.strip(),
+                labels=labels,
+                comments=comments.strip(),
+            )
 
         classification = result.get("classification", {}) or {}
         generated = result.get("generated_response", {}) or {}
@@ -249,6 +248,9 @@ if submit:
         c1.metric("Type", classification.get("type", "unknown"))
         c2.metric("Severity", classification.get("severity", "unknown"))
         c3.metric("Team", classification.get("team", "unknown"))
+
+        if metadata.get("hyde_activated"):
+            st.markdown("<span class='hyde-badge'>🧪 HyDE Activated</span>", unsafe_allow_html=True)
 
         st.markdown("### Routing Explanation")
         st.write(generated.get("routing_explanation", "N/A"))
