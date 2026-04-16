@@ -136,6 +136,9 @@ def run_evaluation(
         if not query_text:
             continue
 
+        title_preview = str(issue.get("title", query_text))[:70]
+        print(f"\n[{index}/{len(issues)}] id={issue_id} — {title_preview}")
+
         # ---- Stage 1: Preprocessing (root module) ----
         clean_query = clean_text_regex(query_text)
         title = str(issue.get("title", "")).strip() or clean_query[:140]

@@ -21,9 +21,9 @@ data/chroma_db/
 data/evaluation_results.json
 
 # Test results (generated)
-tests/dense_only_retrival/results/
-tests/sparse_only_retrival/results/
-tests/hybrid_retrival/results/
+# tests/dense_only_retrival/results/
+# tests/sparse_only_retrival/results/
+# tests/hybrid_retrival/results/
 
 # Environment variables (contains secrets)
 .env
