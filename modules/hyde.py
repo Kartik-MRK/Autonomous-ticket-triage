@@ -61,16 +61,43 @@ def _request_ollama(prompt: str, temperature: float = 0.3, max_tokens: int = 500
     raise RuntimeError("Failed to get HyDE response from Ollama.")
 
 
-HYDE_PROMPT = """You are a senior software engineer. Given the following bug report query, write a HYPOTHETICAL detailed resolved bug report that would be the ideal answer document for this query.
+def _detect_query_type(query: str) -> str:
+    """
+    Improvement 6 — Adaptive HyDE prompts.
+    Detect whether the query describes a bug, feature request, or improvement
+    so HyDE generates a hypothetical document of the matching type.
+    A bug-narrative embedding won't align well with feature-request corpus docs.
+    """
+    q_lower = query.lower()
+    feature_signals = [
+        "add ", "support ", "implement ", "new ", "feature", "allow ",
+        "enable ", "introduce", "provide ", "want to ", "would be nice",
+        "request", "option to", "ability to",
+    ]
+    improvement_signals = [
+        "improve", "enhance", "performance", "optim", "better", "faster",
+        "slow", "memory", "refactor", "polish", "ux ", "accessibility",
+        "reduce", "simplif",
+    ]
+    feature_score = sum(1 for s in feature_signals if s in q_lower)
+    improvement_score = sum(1 for s in improvement_signals if s in q_lower)
+
+    if feature_score > improvement_score and feature_score >= 1:
+        return "feature"
+    if improvement_score > 0 and improvement_score >= feature_score:
+        return "improvement"
+    return "bug"
+
+
+HYDE_BUG_PROMPT = """You are a senior software engineer. Given the following bug report query, write a HYPOTHETICAL detailed resolved bug report that would be the ideal answer document for this query.
 
 The hypothetical document should include:
-- A clear description of the bug
-- The root cause analysis
+- A clear description of the bug and its symptoms
+- The root cause analysis (which component / code path caused it)
 - The solution/fix that was applied
 - Technical details (components involved, code areas affected)
 
-Write the hypothetical resolved bug report as plain text (no JSON, no markdown headers).
-Keep it concise but technically detailed (200-300 words).
+Write as plain text (no JSON, no markdown headers). Keep it concise but technically detailed (200-300 words).
 
 QUERY:
 {query}
@@ -78,19 +105,64 @@ QUERY:
 HYPOTHETICAL RESOLVED BUG REPORT:"""
 
 
+HYDE_FEATURE_PROMPT = """You are a senior software engineer. Given the following feature request query, write a HYPOTHETICAL feature implementation discussion that would be the ideal answer document for this query.
+
+The hypothetical document should include:
+- A clear description of the requested feature and its use case
+- The components and code areas that need to be modified
+- The implementation approach chosen
+- Technical decisions made during implementation
+
+Write as plain text (no JSON, no markdown headers). Keep it concise but technically detailed (200-300 words).
+
+QUERY:
+{query}
+
+HYPOTHETICAL FEATURE IMPLEMENTATION DISCUSSION:"""
+
+
+HYDE_IMPROVEMENT_PROMPT = """You are a senior software engineer. Given the following performance or UX improvement query, write a HYPOTHETICAL improvement analysis document that would be the ideal answer for this query.
+
+The hypothetical document should include:
+- A clear description of the problem being improved
+- Metrics or symptoms that indicated the issue (e.g. slow startup, high memory)
+- The optimization approach and technical changes made
+- Components involved and the measurable improvement achieved
+
+Write as plain text (no JSON, no markdown headers). Keep it concise but technically detailed (200-300 words).
+
+QUERY:
+{query}
+
+HYPOTHETICAL IMPROVEMENT ANALYSIS:"""
+
+
 def generate_hypothetical_document(query: str) -> str:
     """
     Use Ollama to generate a hypothetical document that would
     ideally answer the given query. This is the core of HyDE.
+
+    Improvement 6 — Adaptive Prompts:
+    Detects query type (bug / feature / improvement) and uses a
+    type-specific prompt template so the generated embedding aligns
+    with the actual corpus document type, not always a bug narrative.
     """
-    prompt = HYDE_PROMPT.format(query=query[:1000])
+    query_type = _detect_query_type(query)
+    prompt_map = {
+        "bug": HYDE_BUG_PROMPT,
+        "feature": HYDE_FEATURE_PROMPT,
+        "improvement": HYDE_IMPROVEMENT_PROMPT,
+    }
+    template = prompt_map[query_type]
+    prompt = template.format(query=query[:1000])
+    logger.info(f"HyDE using '{query_type}' prompt template")
     try:
         raw_response = _request_ollama(prompt, temperature=0.3, max_tokens=500)
         hypothetical_doc = _extract_text_block(raw_response)
         if len(hypothetical_doc) < 50:
             logger.warning("HyDE generated a very short hypothetical document, using query as fallback")
             return query
-        logger.info(f"HyDE generated hypothetical document ({len(hypothetical_doc)} chars)")
+        logger.info(f"HyDE generated hypothetical document ({len(hypothetical_doc)} chars, type={query_type})")
         return hypothetical_doc
     except RuntimeError as e:
         logger.error(f"HyDE generation failed: {e}")

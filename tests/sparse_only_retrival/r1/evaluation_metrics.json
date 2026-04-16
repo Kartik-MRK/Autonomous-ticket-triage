@@ -1,0 +1,26 @@
+{
+  "retrieval_mode": "sparse_only",
+  "hyde_enabled": false,
+  "routing_classification": {
+    "top1_accuracy": 0.92,
+    "top3_accuracy": 0.94,
+    "top5_accuracy": 0.94,
+    "precision": 0.9179782608695652,
+    "recall": 0.92,
+    "f1_score": 0.9120844580256346
+  },
+  "retrieval_rag": {
+    "k": 5,
+    "precision_at_k": 0.498,
+    "recall_at_k": 0.026502528453872562,
+    "mrr": 0.6808730158730159,
+    "ndcg_at_k": 0.5070767987440117
+  },
+  "meta": {
+    "num_queries": 100,
+    "hyde_triggers": 0,
+    "elapsed_seconds": 4825.98,
+    "responses_file": "E:\\College_Documents\\Sem-6\\GenAI Project\\Autonomous ticket triage\\tests\\sparse_only_retrival\\results\\query_responses.json",
+    "metrics_file": "E:\\College_Documents\\Sem-6\\GenAI Project\\Autonomous ticket triage\\tests\\sparse_only_retrival\\results\\evaluation_metrics.json"
+  }
+}

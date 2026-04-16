@@ -37,8 +37,8 @@ DEFAULT_METRICS = RESULTS_DIR / "evaluation_metrics.json"
 
 
 def _retrieve_hybrid(query: str) -> list:
-    """Hybrid retrieval using root modules.retrieval (dense + BM25 + RRF)."""
-    return hybrid_retrieve(query, final_top_k=60)
+    """Hybrid retrieval: dense(30) + BM25(30) → weighted RRF → top-60 candidates."""
+    return hybrid_retrieve(query, dense_top_k=30, sparse_top_k=30, final_top_k=60)
 
 
 def main() -> None:

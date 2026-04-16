@@ -1,8 +1,12 @@
 """
-Dense-Only Retrieval Evaluation
-================================
+Dense-Only Retrieval Evaluation (BASELINE)
+============================================
 Uses ONLY dense (vector) retrieval from root modules.
-NO HyDE. Classification and generation use root pipeline modules.
+NO reranker, NO HyDE. Serves as a baseline for comparison
+against the full hybrid pipeline.
+
+Retrieves top-40 candidates using raw cosine similarity scores.
+Classification uses fine-grained known_teams + RAC.
 
 Uses test_processed.json (100 issues) → saves results to results/.
 Usage: python tests/dense_only_retrival/run_eval.py
@@ -36,8 +40,8 @@ DEFAULT_METRICS = RESULTS_DIR / "evaluation_metrics.json"
 
 
 def _retrieve_dense(query: str) -> list:
-    """Dense-only retrieval using root modules.retrieval."""
-    return dense_retrieve(query, top_k=60)
+    """Dense-only retrieval using root modules.retrieval (top-40, no reranker)."""
+    return dense_retrieve(query, top_k=40)
 
 
 def main() -> None:
@@ -75,7 +79,8 @@ def main() -> None:
         known_teams=known_teams,
         responses_output=DEFAULT_RESPONSES,
         metrics_output=DEFAULT_METRICS,
-        hyde_enabled=False,  # NO HyDE for dense-only
+        hyde_enabled=False,   # NO HyDE for baseline
+        use_reranker=False,   # NO reranker for baseline
     )
 
     print("\n" + "=" * 60)

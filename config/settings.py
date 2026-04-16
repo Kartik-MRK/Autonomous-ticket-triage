@@ -35,10 +35,13 @@ class Settings:
     RERANKER_MODEL: str = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-base")
 
     # ---- Retrieval Configuration ----
-    RETRIEVAL_TOP_K: int = int(os.getenv("RETRIEVAL_TOP_K", "20"))
+    RETRIEVAL_TOP_K: int = int(os.getenv("RETRIEVAL_TOP_K", "30"))
     RERANK_TOP_N: int = int(os.getenv("RERANK_TOP_N", "5"))
-    BM25_TOP_K: int = int(os.getenv("BM25_TOP_K", "20"))
-    RRF_K: int = 60  # Reciprocal Rank Fusion constant
+    BM25_TOP_K: int = int(os.getenv("BM25_TOP_K", "30"))
+    RRF_K: int = 60  # Reciprocal Rank Fusion smoothing constant (Cormack et al.)
+    # Weighted RRF: dense model is a stronger semantic signal, give it slight boost
+    DENSE_WEIGHT: float = float(os.getenv("DENSE_WEIGHT", "1.2"))
+    SPARSE_WEIGHT: float = float(os.getenv("SPARSE_WEIGHT", "1.0"))
 
     # ---- HyDE Configuration ----
     HYDE_ENABLED: bool = os.getenv("HYDE_ENABLED", "true").lower() in ("true", "1", "yes")

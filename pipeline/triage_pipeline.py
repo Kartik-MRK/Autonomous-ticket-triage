@@ -173,7 +173,7 @@ def run_triage_pipeline(
             description=clean_body,
             labels=labels,
             known_teams=known_teams if known_teams else None,
-            retrieved_docs=reranked_docs,
+            retrieved_docs=reranked_docs[:10],  # top-10 for vote tally (Fix A+B)
         )
         result["classification"] = classification
         stages_completed.append("classification")
@@ -196,7 +196,7 @@ def run_triage_pipeline(
                 _normalize_label(
                     (doc.get("metadata", {}) if isinstance(doc, dict) else {}).get("team")
                 )
-                for doc in reranked_docs[:5]
+                for doc in reranked_docs[:10]  # expand to 10 for consistent vote signal
             ]
             pred_team = _normalize_label(result["classification"].get("team"))
             matching = sum(1 for rt in retrieved_team_list if rt == pred_team)
@@ -232,7 +232,7 @@ def run_triage_pipeline(
                             description=clean_body,
                             labels=labels,
                             known_teams=known_teams if known_teams else None,
-                            retrieved_docs=reranked_docs,
+                            retrieved_docs=reranked_docs[:10],  # top-10 for vote tally (Fix A+B)
                         )
                         result["classification"] = classification
                         logger.info(f"HyDE re-classified team: {classification.get('team')}")

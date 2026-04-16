@@ -139,10 +139,12 @@ Severity:
 - "high": Critical bug, crash, data loss, security issue, blocks many users
 
 Team Selection:
-- Read the ticket title and description carefully.
-- Look at the similar resolved tickets above — they show which teams handled similar issues.
+- Read the ticket title and description carefully — semantic understanding is the primary driver.
+- Use the TEAM FREQUENCY SUMMARY above as a supporting signal:
+    - If one team is clearly dominant (4+ out of 10), it is a strong hint.
+    - If teams are spread evenly, ignore frequency and rely on semantic content.
 - Pick the team whose past tickets are most semantically similar to this new ticket.
-- If multiple teams seem plausible, prefer the team that appears most frequently in the similar tickets.
+- The field 'component' in similar tickets is also a strong indicator of the correct team.
 
 TICKET TO CLASSIFY:
 Title: {title}
@@ -150,21 +152,63 @@ Description: {description}
 Labels: {labels}
 
 Think step-by-step:
-1. What is this ticket about? (core topic / component)
-2. Which similar past tickets match most closely?
-3. Which team handled those similar tickets?
-4. Therefore, the correct team is...
+1. What is this ticket about? (core topic, component, keywords)
+2. Which of the similar tickets above match most closely by topic?
+3. What team handled those closest matches?
+4. Does the frequency summary agree? (if yes, high confidence; if split, rely on step 3)
+5. Therefore, the correct team is...
 
 Now respond with ONLY the JSON object:"""
 
 
+
 def _format_retrieved_teams_context(retrieved_docs: list[dict]) -> str:
-    """Format retrieved docs into a concise context block for the classifier."""
+    """
+    Format retrieved docs into a context block for the classifier.
+
+    Includes two sections:
+      1. Team Frequency Summary — shows how often each team appears across
+         top-10 docs. Only highlights a majority team when it's genuinely
+         dominant (≥40% of votes), to avoid anchoring on flat/tied distributions.
+      2. Individual ticket details — top-10 docs shown (Fix B).
+    """
     if not retrieved_docs:
         return ""
 
-    lines = ["SIMILAR RESOLVED TICKETS (use these to determine the correct team):"]
-    for i, doc in enumerate(retrieved_docs[:7], 1):
+    from collections import Counter
+
+    # --- Section 1: Team Frequency Summary ---
+    top_n = min(10, len(retrieved_docs))
+    team_counts: Counter = Counter()
+    for doc in retrieved_docs[:top_n]:
+        metadata = doc.get("metadata", {}) if isinstance(doc, dict) else {}
+        team = str(metadata.get("team", "")).strip()
+        if team and team.lower() != "unknown":
+            team_counts[team] += 1
+
+    lines = []
+    if team_counts:
+        lines.append("TEAM FREQUENCY SUMMARY (across top-10 similar tickets):")
+        for team, count in team_counts.most_common():
+            bar = "█" * count
+            lines.append(f"  {team:<35} {bar} ({count}/{top_n})")
+
+        # Only flag a majority team when it's genuinely dominant (≥40% = 4+/10)
+        top_team, top_count = team_counts.most_common(1)[0]
+        if top_count >= max(2, round(top_n * 0.4)):
+            lines.append(
+                f"\n  → Frequency hint: '{top_team}' appears most often "
+                f"({top_count}/{top_n}) — consider this as one signal alongside the ticket content."
+            )
+        else:
+            lines.append(
+                "\n  → Teams are spread across multiple categories — rely on ticket content for routing."
+            )
+        lines.append("")
+
+    # --- Section 2: Individual Ticket Details (top-10, Fix B) ---
+    lines.append("SIMILAR RESOLVED TICKETS (use these to understand the topic and team):")
+    for i, doc in enumerate(retrieved_docs[:10], 1):
         metadata = doc.get("metadata", {}) if isinstance(doc, dict) else {}
         title = metadata.get("title", "Unknown")
         team = metadata.get("team", "unknown")
@@ -174,6 +218,7 @@ def _format_retrieved_teams_context(retrieved_docs: list[dict]) -> str:
             f"  #{i}: \"{title}\" → Team: {team} | Component: {component} (relevance: {score:.3f})"
         )
     return "\n".join(lines)
+
 
 
 def _extract_retrieved_teams(retrieved_docs: list[dict]) -> list[str]:

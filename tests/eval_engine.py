@@ -100,6 +100,7 @@ def run_evaluation(
     responses_output: Path,
     metrics_output: Path,
     hyde_enabled: bool = False,
+    use_reranker: bool = True,
 ) -> Dict[str, object]:
     """
     Run evaluation loop using ROOT pipeline modules.
@@ -108,8 +109,14 @@ def run_evaluation(
     Classification and generation ALWAYS use the root modules:
       - modules.classifier.classify_ticket
       - modules.generator.generate_response
-    HyDE is only triggered when `hyde_enabled=True` AND confidence < threshold.
+    HyDE is only triggered when `hyde_enabled=True` AND agreement < threshold.
     HyDE fires at most ONCE per query (no loops).
+
+    Parameters
+    ----------
+    use_reranker : bool
+        If True (default), apply cross-encoder reranking after retrieval.
+        If False (baseline mode), skip reranking — use raw retrieval scores.
     """
     y_true: List[str] = []
     y_pred: List[str] = []
@@ -136,8 +143,12 @@ def run_evaluation(
         # ---- Stage 2: Retrieval (varies per test) ----
         retrieved_docs = retrieve_fn(clean_query)
 
-        # ---- Stage 3: Reranking (root module) ----
-        reranked_docs = rerank(clean_query, retrieved_docs, top_n=max(10, top_k))
+        # ---- Stage 3: Reranking (conditional) ----
+        if use_reranker:
+            reranked_docs = rerank(clean_query, retrieved_docs, top_n=max(10, top_k))
+        else:
+            # Baseline mode: skip reranker, use raw retrieval order
+            reranked_docs = retrieved_docs[:max(10, top_k)]
 
         # ---- Stage 4: Classification (root module, with known_teams + RAC) ----
         classification = classify_ticket(
@@ -145,7 +156,7 @@ def run_evaluation(
             description=clean_query[:2000],
             labels=[f"component:{issue.get('component', '')}", f"team:{issue.get('team', '')}"],
             known_teams=known_teams,
-            retrieved_docs=reranked_docs[:top_k],
+            retrieved_docs=reranked_docs[:10],  # top-10 for vote tally (Fix A+B)
         )
 
         # ---- Stage 4b: HyDE — triggered by classifier-retrieval AGREEMENT ----
@@ -181,7 +192,7 @@ def run_evaluation(
                             description=clean_query[:2000],
                             labels=[f"component:{issue.get('component', '')}", f"team:{issue.get('team', '')}"],
                             known_teams=known_teams,
-                            retrieved_docs=reranked_docs[:top_k],
+                            retrieved_docs=reranked_docs[:10],  # top-10 for vote tally (Fix A+B)
                         )
                         print(f"  [HyDE] Re-classified team: {classification.get('team')}")
                     else:
@@ -297,6 +308,7 @@ def run_evaluation(
     metrics = {
         "retrieval_mode": retrieval_mode,
         "hyde_enabled": hyde_enabled,
+        "reranker_used": use_reranker,
         "routing_classification": {
             "top1_accuracy": float(top1_hits / total),
             "top3_accuracy": float(top3_hits / total),
